@@ -1,0 +1,900 @@
+import Foundation
+import CoreData
+import CoreDataGenerator
+
+{% macro generateEnumName case variable associatedValue %}{{case.name}}{{ variable.name|upperFirstLetter }}{% call generateTypeName associatedValue.typeName %}{% if associatedValue.localName != nil %}{{ associatedValue.localName|upperFirstLetter }}{% else %}{{ associatedValue.externalName }}{% endif %}{% endmacro %}
+{% macro isPrimitiveType typeName %}{% call typeIsRawEnum typeName %}{% call typeNameIsPrimitive typeName %}{% call typeNameIsPrimitive typeName.array.elementTypeName %}{% endmacro %}
+{% macro generateTypeName typeName %}{% if typeName.isArray %}{{ typeName.array.elementTypeName }}Array{% else %}{{ typeName }}{% endif %}{% endmacro %}
+{% macro typeIsRawEnum type %}{% if type.kind == "enum" and type.rawTypeName %}1{% endif %}{% endmacro %}
+{% macro typeNameIsPrimitive typeName %}{% if typeName.unwrappedTypeName == "Int" or typeName.unwrappedTypeName == "String" or typeName.unwrappedTypeName == "TimeInterval" or typeName.unwrappedTypeName == "Double" or typeName.unwrappedTypeName == "Float" or typeName.unwrappedTypeName == "Decimal" or typeName.unwrappedTypeName == "Bool" or typeName.isDictionary %}1{% endif %}{% endmacro %}
+{% macro extractType variable %}{% if variable.isArray %}{{ variable.typeName.array.elementType.name }}{% else %}{{ variable.type.name }}{% endif %}{% endmacro %}
+{% macro extractManagedType variable %}{% if variable.isArray and variable.typeName.array.elementType.annotations.ManagedObject %}Managed{{ variable.typeName.array.elementType }}{% elif variable.type.annotations.ManagedObject %}Managed{{ variable.type.name }}{% endif %}{% endmacro %}
+{% macro extractEnumManagedType associatedValue variable %}{% if associatedValue.typeName.isArray %}{% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName.array.elementTypeName %}{% endset %}{% if not isPrimitive %}NSOrderedSet{% else %}{{ associatedValue.typeName }}{% endif %}{% else %}{% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}{% if not isPrimitive %}Managed{{ associatedValue.typeName }}{% else %}{{ associatedValue.typeName }}{% endif %}{% endif %}{% endmacro %}
+{% macro variableManagedType variable optionalTrait %}{% set variableTypeName %}{% if variable.type|enum and not variable.type.hasAssociatedValues %}{{ variable.type.rawTypeName }}{% else %}{{ variable.typeName.unwrappedTypeName }}{% endif %}{% endset %}{% if variableTypeName == "Int" or variableTypeName == "Int64" or variableTypeName == "Bool" or variableTypeName == "Double" or variableTypeName == "Float" or variableTypeName == "TimeInterval" or variableTypeName == "Decimal" %}NSNumber{{ optionalTrait }}{% elif variable.type.kind == "enum" and variable.type.rawTypeName %}{{ variable.type.rawTypeName }}{% else %}{{ variable.typeName }}{% endif %}{% endmacro %}
+{% macro idVariable variable %} {% for storeVariable in type.storedVariables where variable.name == storeVariable.annotations.relationshipIdentifier %}{{ storeVariable }}{% endfor %}{% endmacro %}
+{% macro idVariableName variable %}{% for storeVariable in type.storedVariables where variable.name == storeVariable.annotations.relationshipIdentifier %}{{ storeVariable.name }}{% endfor %}{% endmacro %}
+{% macro idVariableIsOptional variable %}{% for storeVariable in type.storedVariables where variable.name == storeVariable.annotations.relationshipIdentifier and storeVariable.isOptional %}{{ storeVariable.isOptional }}{% endfor %}{% endmacro %}
+{% macro variableName variable %}{{ variable.annotations.relationshipName|default:variable.annotations.managedPropertyName|default:variable.name }}{% endmacro %}
+{% macro variableTypeName variable %}{% if variable.type.kind == "enum" and variable.type.rawTypeName %}{{ variable.type.rawTypeName }}{% else %}{{ variable.typeName.unwrappedTypeName }}{% endif %}{% endmacro %}
+{% macro relationshipBuilder entityTypeName managedEntityName relationshipName inverseRelationshipName relationshipVarName variableName targetEntityName deleteRule isArray isFakeArray dataStore %}
+    {% set isPropertyArray %}{% if isArray %}true{% else %}false{% endif %}{% endset %}
+        // {{ entityTypeName }} -> {{ relationshipName }} Relationship
+        {{ relationshipVarName }}.populate(with: "{{ variableName }}", destination: {{ targetEntityName }}, isArray: {{ isPropertyArray }}, deleteRule: {% if deleteRule %}.{{ deleteRule }}{% else %}.cascadeDeleteRule{% endif %}, inverseRelationship: {{ inverseRelationshipName }})
+        {{ dataStore }}.entityDescription(for: "{{ managedEntityName }}").properties.append({{ relationshipVarName }})
+{% endmacro %}
+{% for type in types.all|annotated:"ManagedObject" %}
+{% set managedModelName %}Managed{{ type.name }}{% endset %}
+{% set plainModelName %}{{ type.name }}{% endset %}
+{% macro appendKeypath first second %}{% if not first == "" %}{{first}}.{% endif %}{{second}}{% endmacro %}
+{% macro printKeyPathCases type name isOptional %}
+{% set previousName %}{{name}}{% if isOptional %}?{% endif %}{% endset %}
+{% for variable in type.storedVariables %}
+{% set fullName %}{% call appendKeypath previousName variable.name %}{% endset %}
+{% if not variable.typeName.isArray and variable.type.name != nil %}
+{% if not variable|annotated:"recursive" %}
+{% call printKeyPathCases variable.type fullName variable.typeName.isOptional %}
+{% endif %}
+{% else %}
+{% set variableName %}{{ variable.annotations.accessorName|default:variable.annotations.relationshipName|default:variable.name }}{% endset %}
+            case \{{ plainModelName }}.{% if name != nil %}{{ name }}{% if isOptional %}?{% endif %}.{% endif %}{{ variableName }}: return "{% if name != nil %}{{ name|replace:"?", ""}}.{% endif %}{{ variableName }}"
+{% endif %}
+{% endfor %}
+{% endmacro %}
+{% macro optionalCheckManagedInsertArray variable %}
+{% set idVariable %}{% call idVariable variable %}{% endset %}
+{% set idVariableName %}{% call idVariableName variable %}{% endset %}
+{% set idVariableIsOptional %}{% call idVariableIsOptional variable %}{% endset %}
+{% set relationshipName %}{{ variable.name }}ToManyRelationship{% endset %}
+        let {{ relationshipName }} = NSMutableOrderedSet()
+
+    {% if idVariableName %}
+        {{ idVariableName }}{% if idVariableIsOptional %}?{% endif %}.forEach {
+            if let managedRelationship = Managed{{ variableType }}.createEntity(entityID: $0, context: context) {
+                  {{ relationshipName }}.add(managedRelationship)
+            }
+        }
+    {% else %}
+        for element in plainModel.{{ variable.name }}{% if variable.isOptional %} ?? []{% endif %} {
+            if let managedRelationship = Managed{{ variableType }}
+                   .createEntity(entityID: element[keyPath: {{ variableType }}.idKeyPath], context: context)?
+                   .populate(groupID: groupID, with: element, context: context) {
+                {{ relationshipName }}.add(managedRelationship)
+            }
+        }
+    {% endif %}
+        self.{{ variableName }} = {{ relationshipName }}
+{% endmacro %}
+{% macro optionalCheckManagedInsertEnumArray variable %}
+{% set idVariable %}{% call idVariable variable %}{% endset %}
+{% set idVariableName %}{% call idVariableName variable %}{% endset %}
+{% set idVariableIsOptional %}{% call idVariableIsOptional variable %}{% endset %}
+    {% for case in variable.typeName.array.elementType.cases %}
+        {% for associatedValue in case.associatedValues %}
+        let {{ variable.name }}{% call generateTypeName associatedValue.typeName %}ToManyRelationship = NSMutableOrderedSet()
+        {% endfor %}
+    {% endfor %}
+
+    {% if idVariableName %}
+        {{ idVariableName }}{% if idVariableIsOptional %}?{% endif %}.forEach {
+            {% for case in variable.typeName.array.elementType.cases %}
+              {% for associatedValue in case.associatedValues %}
+                if let managedRelationship = Managed{% call generateTypeName associatedValue.typeName %}.createEntity(entityID: $0, context: context) {
+                    {{ variable.name }}{% call generateTypeName associatedValue.typeName %}ToManyRelationship.add(managedRelationship)
+                }
+              {% endfor %}
+            {% endfor %}
+        }
+    {% else %}
+        // Delete all enums before setting a new one
+        {% for case in variable.typeName.array.elementType.cases %}
+        {% for associatedValue in case.associatedValues %}
+        {{ variable.name }}{% call generateTypeName associatedValue.typeName %} = NSMutableOrderedSet()
+        {% endfor %}
+        {% endfor %}
+
+        for element in plainModel.{{ variable.name }}{% if variable.isOptional %} ?? []{% endif %} {
+            switch element {
+          {% for case in variable.typeName.array.elementType.cases %}
+                case .{{ case.name }}{% if case.hasAssociatedValue %}(let entity):{% else %}: break{% endif %}
+           {% for associatedValue in case.associatedValues %}
+               {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}
+                    if let managedRelationship = {% if not isPrimitive %}Managed{% endif %}{% call generateTypeName associatedValue.typeName %}.createEntity(entityID: entity.uniqueIdValue, context: context)?.populate(groupID: groupID, with: entity, context: context) {
+                        {{ variable.name }}{% call generateTypeName associatedValue.typeName %}ToManyRelationship.add(managedRelationship)
+                    }
+           {% endfor %}
+         {% endfor %}
+            }
+        }
+    {% endif %}
+    {% for case in variable.typeName.array.elementType.cases %}
+      {% for associatedValue in case.associatedValues %}
+        self.{{ variable.name }}{% call generateTypeName associatedValue.typeName %} = {{ variable.name }}{% call generateTypeName associatedValue.typeName %}ToManyRelationship
+      {% endfor %}
+    {% endfor %}
+{% endmacro %}
+{% macro optionalCheckManagedInsert variable %}
+{% set idVariableName %}{% call idVariableName variable %}{% endset %}
+{% set idVariableIsOptional %}{% call idVariableIsOptional variable %}{% endset %}
+{% set entityIDVariableName %}{{ variable.name }}EntityID{% endset %}
+  {% if idVariableName %}
+        let {{ entityIDVariableName }} = {{ idVariableName }}
+    {% if idVariableIsOptional %}
+        if let {{ entityIDVariableName }} = {{ idVariableName }} {
+    {% endif %}
+  {% elif variable.isOptional %}
+        if let {{ variable.name }} = plainModel.{{ variable.name }} {
+            if let managed{{ variable.name|upperFirstLetter }} = Managed{{ variableType }}.get(entityID: {{ variable.name }}.uniqueIdValue, sourceContext: context) {
+                self.{{ variable.name }} = managed{{ variable.name|upperFirstLetter }}
+                return self
+            }
+  {% else %}
+        let {{ variable.name }} = plainModel.{{ variable.name }}
+  {% endif %}
+      {% if idVariableName %}
+        if let managedRelationship = Managed{{ variableType }}
+                .createEntity(entityID: {{ entityIDVariableName }}, context: context) {
+                  self.{{ variableName }} = managedRelationship
+        }
+      {% if idVariableIsOptional %}
+      }
+      {% endif %}
+      {% else %}
+        if let managedRelationship = Managed{{ variableType }}
+                .createEntity(entityID: {{ variable.name }}.uniqueIdValue, context: context)?
+                .populate(groupID: groupID, with: {{ variable.name }}, context: context) {
+                  self.{{ variableName }} = managedRelationship
+        }
+      {% endif %}
+      {% if variable.isOptional and not idVariableName %}
+        }
+    {% endif %}
+{% endmacro %}
+{% macro optionalCheckManagedInsertEnum variable %}
+{% set idVariableName %}{% call idVariableName variable %}{% endset %}
+{% set idVariableIsOptional %}{% call idVariableIsOptional variable %}{% endset %}
+{% set entityIDVariableName %}{{ variable.name }}EntityID{% endset %}
+  {% if idVariableName %}
+        let {{ entityIDVariableName }} = {{ idVariableName }}
+    {% if idVariableIsOptional %}
+        if let {{ entityIDVariableName }} = {{ idVariableName }} {
+    {% endif %}
+  {% elif variable.isOptional %}
+        if let {{ variable.name }} = plainModel.{{ variable.name }} {
+  {% endif %}
+      {% if idVariableName %}
+    {% for case in variable.type.cases %}
+      {% for associatedValue in .associatedValues %}
+        {{ variable.name }}{% call generateTypeName associatedValue.typeName %} = Managed{% call generateTypeName associatedValue.typeName %}.createEntity(entityID: {{ entityIDVariableName }}, context: context)
+      {% endfor %}
+    {% endfor %}
+      {% if idVariableIsOptional %}
+      }
+      {% endif %}
+      {% else %}
+        // Delete all enums before setting a new one
+        {% for case in variable.type.cases %}
+        {% if not case.hasAssociatedValue %}
+        {{case.name}}{{ variable.name|upperFirstLetter }} = nil
+        {% endif %}
+        {% for associatedValue in case.associatedValues %}
+{% if associatedValue.typeName.isArray %}
+    {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName.array.elementTypeName %}{% endset %}
+    {% if isPrimitive %}
+        {% call generateEnumName case variable associatedValue %} = nil
+    {% endif %}
+{% else %}
+    {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}
+    {% if not isPrimitive %}
+        {% call generateEnumName case variable associatedValue %}?.deleteWithoutCommiting(context: context)
+      {% else %}
+        {% call generateEnumName case variable associatedValue %} = nil
+    {% endif %}
+{% endif %}
+{% endfor %}
+{% endfor %}
+        {% if variable.isOptional %}
+        switch {{ variableName }} {
+        {% else %}
+        switch plainModel.{{ variableName }} {
+        {% endif %}
+          {% for case in variable.type.cases %}
+        case .{{ case.name }}{% if case.hasAssociatedValue %}({% for associatedValue in case.associatedValues %}let {{ associatedValue.localName }}entity{{ associatedValue.externalName }}{% if not forloop.last %},{% endif %}{% endfor %}):{% else %}: {{ case.name }}{{ variable.name|upperFirstLetter }} = .empty {% endif %}
+        {% for associatedValue in case.associatedValues %}
+        {% set entityName %}{{ associatedValue.localName }}entity{{ associatedValue.externalName }}{% endset %}
+            {% if associatedValue.typeName.isArray %}
+                {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName.array.elementTypeName %}{% endset %}
+                {% if not isPrimitive %}
+                let {{ entityName }}ToManyRelationship = NSMutableOrderedSet()
+
+                for element in {{ entityName }} {
+                    if let managedRelationship = Managed{{ associatedValue.typeName.array.elementTypeName }}
+                        .createEntity(entityID: element[keyPath: {{ associatedValue.typeName.array.elementTypeName }}.idKeyPath], context: context)?
+                        .populate(groupID: groupID, with: element, context: context) {
+                    {{ entityName }}ToManyRelationship.add(managedRelationship)
+                    }
+                }
+                self.{% call generateEnumName case variable associatedValue %} = {{ entityName }}ToManyRelationship
+            {% else %}{% call generateEnumName case variable associatedValue %} = {{ entityName }}{% endif %}{% else %}{% call generateEnumName case variable associatedValue %} = {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}{% if not isPrimitive %}Managed{% call generateTypeName associatedValue.typeName %}.createEntity(entityID: {{ entityName }}.uniqueIdValue, context: context)?.populate(groupID: groupID, with: {{ entityName }}, context: context){% else %}{{ entityName }}{% endif %}
+{% endif %}
+           {% endfor %}
+         {% endfor %}
+            }
+      {% endif %}
+      {% if variable.isOptional and not idVariableName %}
+        }
+    {% endif %}
+{% endmacro %}
+{% macro enumVariable variable %}
+{% if variable.type.hasAssociatedValues %}
+
+    // ENUM: {{ variable.typeName }}
+  {% for case in variable.type.cases %}
+  {% if not case.hasAssociatedValue %}
+    @NSManaged public var {{case.name}}{{ variable.name|upperFirstLetter }}: String?
+    {% endif %}
+   {% for associatedValue in case.associatedValues %}
+    @NSManaged public var {% call generateEnumName case variable associatedValue %}: {% call extractEnumManagedType associatedValue variable %}?
+   {% endfor %}
+  {% endfor %}
+{% else %}
+    @NSManaged public var {{ variable.name }}: {% call variableManagedType variable "" %}
+{% endif %}
+{% endmacro %}
+{% macro enumVariableArray variable %}
+{% if variable.typeName.array.elementType.hasAssociatedValues %}
+
+    // ENUM: {{ variable.typeName }}
+  {% for case in variable.typeName.array.elementType.cases %}
+   {% for associatedValue in case.associatedValues %}
+    @NSManaged public var {{ variable.name }}{% call generateTypeName associatedValue.typeName %}: NSMutableOrderedSet?
+   {% endfor %}
+  {% endfor %}
+{% else %}
+    @NSManaged public var {{ variable.name }}: {% call variableManagedType variable "" %}
+{% endif %}
+{% endmacro %}
+{% macro enumToPlainModel variable %}{
+  {% for case in variable.type.cases where not case.hasAssociatedValue %}
+            if {{case.name}}{{ variable.name|upperFirstLetter }} != nil {
+                return .{{case.name}}
+            }
+{% endfor %}
+  {% for case in variable.type.cases where case.hasAssociatedValue %}
+            if
+   {% for associatedValue in case.associatedValues %}
+    {% set associatedValueName %}{% call generateEnumName case variable associatedValue %}{% endset %}
+        {% set arrayType %}{% if associatedValue.isArray %}{{ associatedValue.typeName.array.elementTypeName }}{% endif %}
+        {% endset %}
+        {% if associatedValue.typeName.isArray %}
+            {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName.array.elementTypeName %}{% endset %}let associatedValue{{ associatedValueName }} = {{ associatedValueName }}{% if not isPrimitive %}{% endif %}{% ifnot forloop.last %},{% else %} { {% endif %}
+        {% else %}
+            {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}let associatedValue{{ associatedValueName }} = {{ associatedValueName }}{% if not isPrimitive %}, associatedValue{{ associatedValueName }}.lfCoreDataEntityIsPopulated.boolValue{% endif %}{% ifnot forloop.last %},{% else %} { {% endif %}
+        {% endif %}
+   {% endfor %}
+                    return .{{ case.name }}({% for associatedValue in case.associatedValues %}{% if associatedValue.typeName.isArray %}{% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName.array.elementTypeName %}{% endset %}{% set associatedValueName %}{% call generateEnumName case variable associatedValue %}{% endset %}{% if associatedValue.localName != nil %}{{ associatedValue.localName }}: {% endif %}associatedValue{{ associatedValueName }}{% if not isPrimitive %}{% set managedModelName %}Managed{{ associatedValue.typeName.array.elementTypeName }}{% endset %}.filter { ($0 as! {{ managedModelName }}).isPopulated }.compactMap{($0 as! {{ managedModelName }}).toPlainModel(isRecursive:{% if variable.isOptional %} ($0 as! {{ managedModelName }}).isModelRecursive)}{% else %}isRecursive)}{% endif %}{% endif %}{% if forloop.last %}){% else %},{% endif %}{% else %}{% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}{% set associatedValueName %}{% call generateEnumName case variable associatedValue %}{% endset %}{% if associatedValue.localName != nil %}{{ associatedValue.localName }}: {% endif %}associatedValue{{ associatedValueName }}{% if not isPrimitive %}.toPlainModel(){% endif %}{% if forloop.last %}){% else %},{% endif %}{% endif %}
+                    {% endfor %}
+            }
+  {% endfor %}
+  {% if variable.isOptional %}
+            return nil
+  {% else %}
+            fatalError("There are no associated values from which an entity can be pulled")
+  {% endif %}
+          }()
+{% endmacro %}
+{% macro enumArrayToPlainModel variable %}{
+    {% set firstEnumCase %}{{ variable.name }}{{ variable.typeName.array.elementType.cases.first.associatedValues.first.typeName }}{% endset %}
+              let count = {{ firstEnumCase }}{% if variable.isOptional %}?{% endif %}.count ?? 0
+
+              var {{ variable.name }}: {{ variable.typeName }} = []
+              for index in 0..<count {
+                  {% for case in variable.typeName.array.elementType.cases %}
+                   {% for associatedValue in case.associatedValues %}
+                    if let {{ case.name }}Set = {{ variable.name }}{% call generateTypeName associatedValue.typeName %}, let associatedValue = {{ case.name }}Set[index] as? Managed{{ associatedValue.typeName}}, associatedValue.lfCoreDataEntityIsPopulated.boolValue {
+                        {{ variable.name }}?.append(.{{ case.name }}(associatedValue.toPlainModel()))
+                    }
+                   {% endfor %}
+                  {% endfor %}
+              }
+              return {{ variable.name }}
+        }(){% endmacro %}
+
+extension {{ type.name }} { static var managedModelName = "{{ managedModelName }}" }
+
+@objc({{ managedModelName }})
+final public class {{ managedModelName }}: PersistableManagedObject, KeyPathable {
+    @nonobjc public class func fetchRequest() -> NSFetchRequest<{{ managedModelName }}> {
+        return NSFetchRequest<{{ managedModelName }}>(entityName: "{{ managedModelName }}")
+    }
+
+    {% for variable in type.variables|annotated:"primaryKey" %}
+    public static var idKeyPath: WritableKeyPath<{{ managedModelName }}, {{ variable.typeName }}> {
+        return \{{ managedModelName }}.{{ variable.name }}
+    }
+    {% empty %}
+    #error("ERROR! Entity must have a propety declared as a unique constraint with \"primaryKey\"")
+    {% endfor %}
+
+    public static var groupIDKeyPath: WritableKeyPath<{{ managedModelName }}, String?> {
+        return \{{ managedModelName }}.lfCoreDataEntityGroupIdentifier
+    }
+
+    @NSManaged @objc(lfCoreDataEntityIsPopulated) public var lfCoreDataEntityIsPopulated: NSNumber
+
+    public var isPopulated: Bool {
+        return lfCoreDataEntityIsPopulated as! Bool
+    }
+
+    @NSManaged @objc(lfCoreDataEntityGroupIdentifier) public var lfCoreDataEntityGroupIdentifier: String?
+
+    {% if type|enum and type.hasAssociatedValues %}
+        {% for variable in type.variables|annotated:"primaryKey" %}
+    @NSManaged public var {{ variable.name }}: {% call variableManagedType variable "" %}
+        {% empty %}
+    ERROR! Enum types must have a primary key annotated with "primaryKey"
+        {% endfor %}
+    @NSManaged @objc(data) public var data: Data
+    {% else %}
+        {% for variable in type.variables %}
+          {% if variable.type|enum %}
+            {% call enumVariable variable %}
+          {% elif variable.typeName.array.elementType|enum %}
+            {% call enumVariableArray variable %}
+          {% else %}
+            {% set variableName %}{% call variableName variable %}{% endset %}
+            {% set variableTypeName %}{% call variableTypeName variable%}{% endset %}
+            {% set optionalTrait %}{% if variable.isOptional %}?{% endif %}{% endset %}
+            {% set managedVariableType %}{% call extractManagedType variable %}{% endset %}
+            {% set variableType %}{% if variable.annotations.toDataAttribute %}Data{{ optionalTrait }}{% elif managedVariableType %}{% if variable.isArray and not variable.annotations.fakeArray %}NSOrderedSet{% else %}{{ managedVariableType }}{{ optionalTrait }}{% endif %}{% else %}{% call variableManagedType variable optionalTrait %}{% endif %}{% endset %}
+    @NSManaged public var {{ variableName }}: {{ variableType }}
+          {% endif %}
+        {% endfor %}
+    {% endif %}
+
+    var plainModel: {{ plainModelName }}?
+    var plainCounter = 0
+    public var isModelRecursive: Bool { return plainCounter > 5 }
+{% macro toPlainModel variable mode %}
+          {% set managedVariableType %}{% call extractManagedType variable %}{% endset %}
+      {% set managedModelName %}Managed{% call extractType variable %}{% endset %}
+      {% set variableName %}{{ variable.annotations.accessorName|default:variable.annotations.relationshipName|default:variable.name }}{% endset %}
+      {% set variableTypeName %}{% call variableTypeName variable %}{% endset %}
+      {% set optionalTrait %}{% if variable.isOptional %}?{% endif %}{% endset %}
+      {% set forcedOptionalTrait %}{% if variable.isOptional %}!{% endif %}{% endset %}
+      {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}
+      {% set isRecursivePlainEnd %}{% if not isPrimitive and mode != "init" and variable|annotated:"recursive" %}}{% endif %}{% endset %}
+      {% set optionalNil %}{% if variable.isOptional and not variable.isArray %} ?? nil{% endif %}{% endset %}
+      {% set parameterName %}{% if mode == "init" %}{{ variableName }}: {% else %}{% if not isPrimitive and variable|annotated:"recursive" %}if !isRecursive { {% endif %}model.{{ variableName }} = {% endif %}{% endset %}
+      {% set postOperation %}{% if managedVariableType %}{% if variable.isArray and not variable.annotations.fakeArray %}.filter { ($0 as! {{ managedModelName }}).isPopulated }.compactMap{($0 as! {{ managedModelName }}).toPlainModel(isRecursive:{% if variable.isOptional %} ($0 as! {{ managedModelName }}).isModelRecursive{% else %}isRecursive{% endif %}){{ isRecursivePlainEnd }}}{% else %}{{ optionalTrait }}.toPlainModel(isRecursive:{% if variable.isOptional %} {{ variableName }}?.isModelRecursive ?? false{% else %}isRecursive{% endif %}){{ isRecursivePlainEnd }}{% endif %}{% else %}{% if variableTypeName == "Int" %}{{ optionalTrait }}.intValue{% else %}{% if variableTypeName == "Int64" %}{{ optionalTrait }}.int64Value{% else %}{% if variableTypeName == "Bool" %}{{ optionalTrait }}.boolValue{% else %}{% if variableTypeName == "Double" or variableTypeName == "TimeInterval" %}{{ optionalTrait }}.doubleValue{% else %}{% if variableTypeName == "Decimal" %}{{ optionalTrait }}.decimalValue{% endif %}{% endif %}{% endif %}{% endif %}{% endif %}{% endif %}{% endset %}
+      {% set isRecursive %}{% if variableTypeName == "Int" or variableTypeName == "Int64" or variableTypeName == "Bool" or variableTypeName == "TimeInterval" or variableTypeName == "Double" or variableTypeName == "String" or variableTypeName == "Decimal" %}{% elif variable.isOptional and variable|annotated:"recursive" %}isRecursive ? nil : {% endif %}{% endset %}
+      {% set assignmentVariableName %}{% if variable.annotations.managedPropertyName %}self.{{ variable.annotations.managedPropertyName }}{% else %}{{ isRecursive }}self.{{ variableName }}{% endif %}{{ postOperation }}{% endset %}
+      {% set assignment %}{% if variable.type.kind == "enum" and variable.type.rawTypeName %}{{ variable.typeName.name }}(rawValue: {{ assignmentVariableName }})!{% else %}{{ assignmentVariableName }}{% endif %}{% endset %}
+      {% set fromDataAssignment %}{% if variable.isOptional %}self.data == nil ? nil :{% endif %}try{{ optionalTrait }} JSONDecoder().decode({{variableTypeName}}.self from: self.{{ variable.name }}{{ forcedOptionalTrait }}){% endset %}
+          {% if variable.isMutable or mode == "init" %}
+            {{ parameterName }}{% if variable.type|enum %}{% call enumToPlainModel variable %}{% elif variable.typeName.array.elementType|enum and variable.typeName.array.elementType.hasAssociatedValues %}{% call enumArrayToPlainModel variable %}{% elif variable.annotations.toDataAttribute %}{{ fromDataAssignment }}{% else %}{{ assignment }}{% endif %}{% if not forloop.last %}{% if mode == "init" %},{% else %}{% endif %}{% endif %}
+    {% endif %}
+{% endmacro %}
+
+    func toPlainModel(isRecursive: Bool = false) -> {{ plainModelName }} {
+        plainCounter.increment(); defer { plainCounter.decrement() }
+      {% set instanceName %}{{ plainModelName|lowerFirstLetter }}{% endset %}
+      {% set binding %}{% if type.storedVariables|annotated:"relationshipResolvedBy"|count > 0 %}var{% else %}let{% endif %}{% endset %}
+        if {% if type.kind == "struct" %}var{% else %}let{% endif %} model = self.plainModel {
+    {% for variable in type.storedVariables %}
+          {% call toPlainModel variable "" %}
+      {% endfor %}
+        } else {
+            let {{ instanceName }} = {{ plainModelName }}(
+      {% for variable in type.storedVariables %}
+              {% call toPlainModel variable "init" %}
+      {% endfor %}
+        )
+        self.plainModel = {{ instanceName }}
+      }
+        return plainModel!
+    }
+
+    override public func awakeFromInsert() {
+      super.awakeFromInsert()
+  {% for variable in type.storedVariables %}
+      {% set variableName %}{% call variableName variable %}{% endset %}
+      {% if not variable.isOptional %}
+      {% if variable.typeName.name == "String" %}
+      self.{{ variableName }} = .empty
+      {% elif variable.typeName.name == "Decimal" or variable.typeName.name == "Int" or variable.typeName.name == "TimeInterval" or variable.typeName.name == "Bool" or variable.typeName.name == "Double" %}
+      self.{{ variableName }} = .empty
+      {% elif variable.type.kind == "enum" %}
+      {% if variable.type.rawTypeName.name == "String" %}
+      self.{{ variableName }} = .empty
+      {% elif variable.type.rawTypeName.name == "Decimal" or variable.type.rawTypeName.name == "Int" or variable.type.rawTypeName.name == "Bool" or variable.type.rawTypeName.name == "Double" %}
+      self.{{ variableName }} = NSNumber(0)
+      {% endif %}
+      {% elif variable.isArray %}
+      self.{{ variableName }} = []
+      {% endif %}
+      {% endif %}
+  {% endfor %}
+    }
+
+
+    @discardableResult
+    public func populate<T : Persistable>(groupID: String?, with plainModel: T, context: NSManagedObjectContext) -> Self {
+        guard let plainModel = plainModel as? {{ plainModelName }} else { return self }
+        lfCoreDataEntityIsPopulated = NSNumber(booleanLiteral: true)
+        lfCoreDataEntityGroupIdentifier = groupID
+      {% if type|annotated:"autoId" %}
+        // Set autoID
+        {% for variable in type.variables|annotated:"primaryKey" %}
+        {{ variable.name }} = UUID().uuidString
+        {% empty %}
+        #error("ERROR! Entity must have a property declared as a unique constraint with \"primaryKey\"")
+        {% endfor %}
+      {% endif %}
+      {% for variable in type.storedVariables %}
+      {% set variableType %}{% call extractType variable %}{% endset %}
+      {% set variableName %}{% call variableName variable %}{% endset %}
+      {% set variableTypeName %}{% if variable.type.kind == "enum" and variable.type.rawTypeName %}{{ variable.type.rawTypeName }}{% else %}{{ variable.typeName.unwrappedTypeName }}{% endif %}{% endset %}
+      {% set rawValueEnumTrait %}{% if variable.type.kind == "enum" and variable.type.rawTypeName %}.rawValue{% endif %}{% endset %}
+      {% set optionalTrait %}{% if variable.isOptional %}?{% endif %}{% endset %}
+      {% set castType %}{% if variableTypeName == "Int" or variableTypeName == "Int64" or variableTypeName == "Bool" or variableTypeName == "Double" or variableTypeName == "TimeInterval" or variableTypeName == "Decimal" %}as NSNumber{{ optionalTrait }}{% endif %}{% endset %}
+      {% if variable.annotations.toDataAttribute %}
+      {{ variableName }} = {% if variable.isOptional %}plainModel.{{ variable.name }} == nil ? nil : {% endif %}try JSONEncoder().encode(plainModel.{{ variable.name }})
+      {% else %}
+      {% set managedVariableType %}{% call extractManagedType variable %}{% endset %}
+      {% if variable.isArray %}
+        {% if variable.typeName.array.elementType|enum and variable.typeName.array.elementType.hasAssociatedValues %}
+      {% call optionalCheckManagedInsertEnumArray variable %}
+        {% elif managedVariableType %}
+      {% call optionalCheckManagedInsertArray variable %}
+        {% elif not type.annotations.autoId or not variable.annotations.primaryKey %}
+        {{ variableName }} = plainModel.{{ variable.name }}{{ rawValueEnumTrait }} {{ castType }}
+        {% endif %}
+      {% else %}
+        {% if variable.type|enum and variable.type.hasAssociatedValues %}
+      {% call optionalCheckManagedInsertEnum variable %}
+        {% elif managedVariableType %}
+      {% call optionalCheckManagedInsert variable %}
+        {% elif not type.annotations.autoId or not variable.annotations.primaryKey %}
+        {{ variableName }} = plainModel.{{ variable.name }}{{ rawValueEnumTrait }} {{ castType }}
+        {% endif %}
+      {% endif %}
+      {% endif %}
+      {% endfor %}
+        return self
+    }
+
+    public static func managedKeyPathFrom<EntityType, VariableType>(_ plainKeyPath: KeyPath<EntityType, VariableType>) -> String {
+        switch plainKeyPath {
+            {% call printKeyPathCases type nil false %}
+            default: return ""
+        }
+    }
+
+    public static func getAllGroups(sourceContext: NSManagedObjectContext = CoreDataStore.shared.mainContext) -> [String]? {
+        do {
+            let fetchRequest = NSFetchRequest<NSDictionary>(entityName: "{{ managedModelName }}")
+            fetchRequest.returnsDistinctResults = true
+            fetchRequest.resultType = .dictionaryResultType
+            fetchRequest.propertiesToFetch = ["lfCoreDataEntityGroupIdentifier"]
+            let result = try sourceContext.fetch(fetchRequest).flatMap { $0.allValues }.compactMap { $0 as? String }
+            return result
+        } catch {
+            logError(error)
+            return nil
+        }
+    }
+}
+
+extension {{ plainModelName }}: Persistable, UniqueIDConstraintKeyPath {
+    {% for variable in type.variables|annotated:"primaryKey" %}
+    public static var idKeyPath: WritableKeyPath<{{ plainModelName }}, {{ managedModelName }}.EntityID> {
+        return \{{ plainModelName }}.{{ variable.name }}
+    }
+    {% empty %}
+    #error("ERROR! Entity must have a property declared as a unique constraint with \"primaryKey\"")
+    {% endfor %}
+
+    public static func count(groupID: String? = nil, using predicate: NSPredicate = .true, sourceContext: NSManagedObjectContext = CoreDataStore.shared.mainContext) -> Int {
+        return {{ managedModelName }}.count(groupID: groupID, using: predicate, sourceContext: sourceContext)
+    }
+
+    public static func get(entityID: {{ managedModelName }}.EntityID, sourceContext: NSManagedObjectContext = CoreDataStore.shared.mainContext) -> {{ plainModelName }}? {
+        {{ managedModelName }}.get(entityID: entityID, sourceContext: sourceContext)?.toPlainModel()
+    }
+
+    public static func get(groupID: String? = nil, using predicate: NSPredicate, comparisonClauses: [ComparisonClause] = [], sourceContext: NSManagedObjectContext = CoreDataStore.shared.mainContext) -> [{{ plainModelName }}] {
+        {{ managedModelName }}.get(groupID: groupID, using: predicate, comparisonClauses: comparisonClauses, sourceContext: sourceContext).map { $0.toPlainModel() }
+    }
+
+    public static func getAll(groupID: String? = nil, comparisonClauses: [ComparisonClause] = [], sourceContext: NSManagedObjectContext = CoreDataStore.shared.mainContext) -> [{{ plainModelName }}] {
+        {{ managedModelName }}.getAll(groupID: groupID, comparisonClauses: comparisonClauses, sourceContext: sourceContext).map { $0.toPlainModel() }
+    }
+
+    public static func create(groupID: String? = nil,
+                              updateIfEntityExists: Bool,
+                              updateClosure: @escaping (_ entity: inout {{ plainModelName }}, _ context: NSManagedObjectContext) -> Void,
+                              completeClosure: ((Result<{{ plainModelName }}, PersistableError>) -> Void)?) {
+                               {{ managedModelName }}.create(groupID: groupID,
+            updateIfEntityExists: updateIfEntityExists,
+            updateClosure: { (entity, context) in
+                var plainEntity: {{ plainModelName }} = entity.toPlainModel()
+                updateClosure(&plainEntity, context)
+            entity.populate(groupID: groupID, with: plainEntity, context: context)
+        }, completeClosure: { result in
+            switch result {
+                case .success(let entity):
+                    completeClosure?(.success(entity.toPlainModel()))
+
+                case .failure(let error):
+                    completeClosure?(.failure(error))
+            }
+        })
+    }
+
+    public static func createEntity(groupID: String? = nil, entityID: {{ managedModelName }}.EntityID, context: NSManagedObjectContext) -> {{ plainModelName }}? {
+        {{ managedModelName }}.createEntity(groupID: groupID, entityID: entityID, context: context)?.toPlainModel()
+    }
+
+    public static func createTemporary(groupID: String? = nil, updateClosure: @escaping (inout {{ plainModelName }}, NSManagedObjectContext) -> Void) {
+        {{ managedModelName }}.createTemporary { (entity, context) in
+            var plainEntity = entity.toPlainModel()
+            updateClosure(&plainEntity, context)
+            entity.populate(groupID: groupID, with: plainEntity, context: context)
+        }
+    }
+
+    public func createAndPopulate(groupID: String? = nil, updateIfEntityExists: Bool = true, insertionPolicy: BatchInsertionPolicy = .insertOrUpdate, completeClosure: ((Result<{{ plainModelName }}, PersistableError>) -> Void)?) {
+        {{ managedModelName }}.createBatchAndPopulate(groupID: groupID, from: [self], insertionPolicy: insertionPolicy) { result in
+            switch result {
+            case .success(let response):
+                guard let savedEntity = response.first else { completeClosure?(.failure(.failedToSaveEntityToStore)); return }
+                completeClosure?(.success(savedEntity))
+            case .failure(let error):
+                completeClosure?(.failure(error))
+            }
+        }
+    }
+
+    public func update(updateClosure: @escaping (inout {{ plainModelName }}, NSManagedObjectContext) -> Void, completeClosure: (({{ plainModelName }}) -> Void)?) {
+        let managedEntity = {{ managedModelName }}.get(entityID: self[keyPath: Self.idKeyPath])
+
+        managedEntity?.update(updateClosure: { (entity, context) in
+            var mutableSelf = self
+            updateClosure(&mutableSelf, context)
+            entity.populate(groupID: managedEntity?.lfCoreDataEntityGroupIdentifier, with: mutableSelf, context: context)
+
+        }, completeClosure: { updatedEntity in
+            completeClosure?(updatedEntity.toPlainModel())
+        })
+    }
+
+    public func delete(sourceContext: NSManagedObjectContext = CoreDataStore.shared.newBackgroundContext, completeClosure: (() -> Void)?) {
+        let managedEntity = {{ managedModelName }}.get(entityID: self[keyPath: Self.idKeyPath], sourceContext: sourceContext)
+        managedEntity?.delete(sourceContext: sourceContext, completeClosure: completeClosure)
+    }
+
+    public static func delete(with options: DeleteOptions = DeleteOptions(), completeClosure: (() -> Void)?) {
+        {{ managedModelName }}.delete(with: options, completeClosure: completeClosure)
+    }
+
+    public static func createBatchAndPopulate<PersistableType: Persistable & UniqueIDConstraintKeyPath>(groupID: String? = nil, from plainModels: [PersistableType], insertionPolicy: BatchInsertionPolicy = .insertOrUpdate, completeClosure: ((Result<[PersistableType], PersistableError>) -> Void)?) {
+      {{ managedModelName }}.createBatchAndPopulate(groupID: groupID, from: plainModels, insertionPolicy: insertionPolicy, completeClosure: completeClosure)
+    }
+
+    public static func getAllGroups(sourceContext: NSManagedObjectContext = CoreDataStore.shared.mainContext) -> [String]? {
+        return {{ managedModelName }}.getAllGroups(sourceContext: sourceContext)
+    }
+}
+{% endfor %}
+{% macro extractCases variable %}{% if variable.type|enum and variable.type.hasAssociatedValues %}{{ variable.type.cases }}{% elif variable.typeName.array.elementType|enum and variable.typeName.array.elementType.hasAssociatedValues %}{{ variable.typeName.array.elementType.cases }}{% endif %}{% endmacro %}
+
+{% set targetVersion %}{% for type in types.all where type.name == "DataStoreVersion" %}{% set isTargetModelVersionSet %}{% for case in type.rawVariables|annotated:"targetModelVersion" %}{% if forloop.length > 0 %}}1{% endif %}{% endfor %}{% endset %}{% if isTargetModelVersionSet %}{% for case in type.rawVariables|annotated:"targetModelVersion" %}{{ case.name }}{% endfor %}{% else %}{% for case in type.rawVariables %}{{ case.name }}{% endfor %}{% endif %}{% endfor %}{% endset %}
+
+// MARK: - CoreDataEntity
+struct CoreDataEntity {
+    static func getAllCoreDataStoreInstances() -> [CoreDataStore] {
+        return [
+    {% for type in types.all where type.name == "DataStoreVersion" %}
+        {% for case in type.rawVariables %}
+            {% set version %}{{ case.name }}{% endset %}
+            {% if not case|annotated:"targetVersion" %}CoreDataEntity.coreDataStore_{{ version }}{% if not forloop.last %},{% endif %}{% endif %}
+        {% endfor %}
+    {% endfor %}
+        ]
+    }
+
+    static func getAllVersions() -> [ModelVersion] {
+        return [
+    {% for type in types.all where type.name == "DataStoreVersion" %}
+        {% for case in type.rawVariables %}
+            {% set version %}{{ case.name }}{% endset %}DataStoreVersion.{{ version }}{% if not forloop.last %},{% endif %}
+        {% endfor %}
+    {% endfor %}
+        ]
+    }
+}
+
+// MARK: - CoreData Setup
+struct CDG {
+    static func setup() {
+    // Setup and load entity descriptions for all different versions of data store
+    {% for type in types.all where type.name == "DataStoreVersion" %}
+        {% for case in type.rawVariables|annotated:"targetModelVersion" %}
+        {% if forloop.length > 1 %}
+            #error("ERROR! Annotation `targetModelVersion` can be set to only one version. Currently `targetModelVersion` is set to version: {{case.name}}.")
+        {% endif %}
+        {% endfor %}
+        {% for case in type.rawVariables %}
+        {% set version %}{{ case.name }}{% endset %}
+        {% if not case|annotated:"targetVersion" %}CoreDataEntity.loadEntityDescriptions_{{ version }}(){% endif %}
+        {% endfor %}
+    {% endfor %}
+
+        CoreDataStore.saveVersions(CoreDataEntity.getAllVersions())
+        CoreDataStore.saveDataStoreVersions(CoreDataEntity.getAllCoreDataStoreInstances())
+    }
+}
+
+// sourcery:file:EntityDescription_{{ targetVersion }}
+import CoreDataGenerator
+import CoreData
+import Foundation
+
+extension CoreDataEntity {
+{% set dataStoreName %}coreDataStore_{{ targetVersion }}{% endset %}
+    static let {{ dataStoreName }} = CoreDataStore(with: DataStoreVersion.{{ targetVersion }})
+
+    static func loadEntityDescriptions_{{ targetVersion }}() {
+    {% for modelType in types.all|annotated:"ManagedObject" %}
+    {% set managedEntityName %}Managed{{ modelType.name }}{% endset %}
+    {% set entityName %}{{ modelType.name|lowerFirstLetter }}Description{% endset %}
+    {% set propertiesName %}{{ modelType.name|lowerFirstLetter }}Properties{% endset %}
+        // MARK: - {{ managedEntityName }} Entity Definitions
+        let {{ entityName }} = {{ dataStoreName }}.entityDescription(for: "{{ managedEntityName }}")
+        var {{ propertiesName }}: [NSPropertyDescription] = []
+        // MARK: - {{ modelType.name }} Entity Relationship Declarations
+      {% for variable in modelType.storedVariables %}
+      {% set managedVariableType %}{% call extractManagedType variable %}{% endset %}
+        {% if managedVariableType %}
+        {% set relationshipName %}{{ modelType.name|lowerFirstLetter }}{{ variable.annotations.relationshipName|default:variable.name|upperFirstLetter }}Relationship{% endset %}
+        {% set inverseRelationshipName %}{{ modelType.name|lowerFirstLetter }}Inverse{{ variable.annotations.relationshipName|default:variable.name|upperFirstLetter }}Relationship{% endset %}
+        let {{ relationshipName }} = NSRelationshipDescription()
+        let {{ inverseRelationshipName }} = NSRelationshipDescription()
+        {% elif variable.type|enum and variable.type.hasAssociatedValues %}
+        {% for case in variable.type.cases %}
+        {% for associatedValue in case.associatedValues %}
+        {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}
+        {% if not isPrimitive %}
+        let {% call generateEnumName case variable associatedValue %}Relationship = NSRelationshipDescription()
+        let inverse{{case.name|upperFirstLetter}}{{ variable.name|upperFirstLetter }}{% call generateTypeName associatedValue.typeName %}Relationship = NSRelationshipDescription()
+        {% endif %}
+            {% endfor %}
+          {% endfor %}
+        {% elif variable.typeName.array.elementType|enum and variable.typeName.array.elementType.hasAssociatedValues %}
+          {% for case in variable.typeName.array.elementType.cases %}
+            {% for associatedValue in case.associatedValues %}
+        let {{ variable.name }}{% call generateTypeName associatedValue.typeName %}Relationship = NSRelationshipDescription()
+        let inverse{{ variable.name|upperFirstLetter }}{% call generateTypeName associatedValue.typeName %}Relationship = NSRelationshipDescription()
+          {% endfor %}
+        {% endfor %}
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+    {% for entityTemplate in types.all|annotated:"ManagedObject" %}
+    {% set entityName %}{{ entityTemplate.name|lowerFirstLetter }}Description{% endset %}
+    {% set propertiesName %}{{ entityTemplate.name|lowerFirstLetter }}Properties{% endset %}
+    {% for variable in entityTemplate.storedVariables %}
+    {% set variableTypeName %}{% if variable.type|enum and not variable.type.hasAssociatedValues %}{{ variable.type.rawTypeName }}{% else %}{{ variable.typeName }}{% endif %}{% endset %}
+
+    {% set managedType %}{% call extractManagedType variable %}{% endset %}
+    {% set attributeName %}{{ entityTemplate.name|lowerFirstLetter }}{{ variable.name|upperFirstLetter }}Attribute{% endset %}
+    {% set optionalTrait %}{% if variable.isOptional %}?{% endif %}{% endset %}
+    {% set isOptional %}{% if variable.isOptional %}true{% else %}false{% endif %}{% endset %}
+    {% set isIndexed %}{% if variable.annotations.indexed %}true{% else %}false{% endif %}{% endset %}
+    {% if not managedType %}
+    {% if not variable.type.hasAssociatedValues %}
+        // {{ entityTemplate.name }}.{{ attributeName }} Attribute
+        {{ propertiesName }}.append(create(attribute: "{{ variable.annotations.managedPropertyName|default:variable.name }}", type: attributeType(for: "{{ variable.name }}", ofType: {% if variable.annotations.toDataAttribute %}Data{{ optionalTrait }}{% else %}{{ variableTypeName }}{% endif %}.self), isOptional: {{ isOptional }}))
+    {% else %}
+    {% for case in variable.type.cases %}
+    {% if not case.hasAssociatedValue %}
+        {% set enumAttributeName %}{{ case.name }}{{ variable.name|upperFirstLetter }}{% endset %}
+        // {{ entityTemplate.name }}.{{ attributeName }} Attribute
+        {{ propertiesName }}.append(create(attribute: "{{ case.name }}{{ variable.name|upperFirstLetter }}", type: attributeType(for: "{{ case.name }}{{ variable.name|upperFirstLetter }}", ofType: {% if variable.annotations.toDataAttribute %}Data{{ optionalTrait }}{% else %}String{% endif %}.self), isOptional: true))
+    {% endif %}
+        {% for associatedValue in case.associatedValues %}
+        {% if associatedValue.typeName.isArray %}
+        {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName.array.elementTypeName %}{% endset %}
+        {% if isPrimitive %}
+        {% set enumAttributeName %}{{ case.name }}{{ associatedValue.localName }}{{ associatedValue.externalName }}{{ attributeName|upperFirstLetter }}{% endset %}
+        // {{ entityTemplate.name }}.{{ attributeName }} Attribute
+        {{ propertiesName }}.append(create(attribute: "{% call generateEnumName case variable associatedValue %}", type: attributeType(for: "{% call generateEnumName case variable associatedValue %}", ofType: {% if variable.annotations.toDataAttribute %}Data{{ optionalTrait }}{% else %}{{ associatedValue.typeName }}{% endif %}.self), isOptional: true))
+        {% endif %}
+        {% else %}
+        {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}
+        {% if isPrimitive %}
+        {% set enumAttributeName %}{{ case.name }}{{ associatedValue.localName }}{{ associatedValue.externalName }}{{ attributeName|upperFirstLetter }}{% endset %}
+        // {{ entityTemplate.name }}.{{ attributeName }} Attribute
+        {{ propertiesName }}.append(create(attribute: "{% call generateEnumName case variable associatedValue %}", type: attributeType(for: "{% call generateEnumName case variable associatedValue %}", ofType: {% if variable.annotations.toDataAttribute %}Data{{ optionalTrait }}{% else %}{% call generateTypeName associatedValue.typeName %}{% endif %}.self), isOptional: true))
+        {% endif %}
+        {% endif %}
+        {% endfor %}
+    {% endfor %}
+{% endif %}
+    {% endif %}
+    {% endfor %}
+    {% set populatedFlagAttributeName %}{{ entityTemplate.name|lowerFirstLetter }}IsPopulatedAttribute{% endset %}
+        {{ propertiesName }}.append(create(attribute: "lfCoreDataEntityIsPopulated", type: .booleanAttributeType, isOptional: false, defaultValue: false))
+    {% set groupIdentifierAttributeName %}{{ entityTemplate.name|lowerFirstLetter }}GroupIdentifierAttribute{% endset %}
+        {{ propertiesName }}.append(create(attribute: "lfCoreDataEntityGroupIdentifier", type: .stringAttributeType, isOptional: true))
+        {{ entityName }}.properties = {{ propertiesName }}
+    {% endfor %}
+    {% for entityTemplate in types.all|annotated:"ManagedObject" %}
+    {% for variable in entityTemplate.storedVariables %}
+    {% set entityName %}{{ entityTemplate.name|lowerFirstLetter }}Description{% endset %}
+    {% set propertiesName %}{{ entityTemplate.name|lowerFirstLetter }}Properties{% endset %}
+    {% set managedType %}{% call extractManagedType variable %}{% endset %}
+    {% set variableCases %}{% call extractCases variable %}{% endset %}
+    {% set managedEntityName %}Managed{{ entityTemplate.name }}{% endset %}
+    {% set relationshipVarName %}{{ entityTemplate.name|lowerFirstLetter }}{{ variable.annotations.relationshipName|default:variable.name|upperFirstLetter }}Relationship{% endset %}
+    {% set targetEntityType %}Managed{% call extractType variable %}{% endset %}
+    {% set targetEntityName %}{{ dataStoreName }}.entityDescription(for: "{{ targetEntityType }}"){% endset %}
+    {% set entityName %}{{ dataStoreName }}.entityDescription(for: "Managed{{ entityTemplate.name }}"){% endset %}
+    {% set relationshipName %}{{ variable.annotations.relationshipName|default:targetEntityType }}{% endset %}
+    {% set inverseRelationshipName %}{{ entityTemplate.name|lowerFirstLetter }}Inverse{{ variable.annotations.relationshipName|default:variable.name|upperFirstLetter }}Relationship{% endset %}
+    {% set inverseRelationshipCommentName %}{{ relationshipName }} Inverse{% endset %}
+    {% set defaultInverseRelationshipName %}inverse{{ variable.name|upperFirstLetter}}{% endset %}
+    {% set inverseRelationshipVarName %}{{ variable.annotations.relationshipName|default:defaultInverseRelationshipName }}Relationship{% endset %}
+    {% if managedType %}
+        {% call relationshipBuilder managedEntityName managedEntityName relationshipName inverseRelationshipName relationshipVarName variable.name targetEntityName variable.annotations.relationshipDeleteRule variable.isArray variable.annotations.fakeArray dataStoreName  %}
+
+        {% call relationshipBuilder managedEntityName relationshipName inverseRelationshipCommentName relationshipVarName inverseRelationshipName inverseRelationshipName entityName variable.annotations.relationshipDeleteRule variable.isArray variable.annotations.fakeArray dataStoreName  %}
+
+    {% elif variable.type|enum and variable.type.hasAssociatedValues %}
+      {% for case in variable.type.cases %}
+        {% for associatedValue in case.associatedValues %}
+          {% set enumRelationshipName %}{% call generateEnumName case variable associatedValue %}{% endset %}
+          {% set enumRelationshipVarName %}{{ enumRelationshipName }}Relationship{% endset %}
+          {% set inverseEnumName %}inverse{{case.name|upperFirstLetter}}{{ variable.name|upperFirstLetter }}{% call generateTypeName associatedValue.typeName %}{% endset %}
+            {% set inverseEnumRelationshipName %}{{ inverseEnumName }}Relationship{% endset %}
+            {% if associatedValue.typeName.isArray %}
+            {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName.array.elementTypeName %}{% endset %}
+            {% set associatedValueManagedTypeName %}Managed{% call generateTypeName associatedValue.typeName.array.elementTypeName %}{% endset %}
+            {% set associatedValueTypeFetch %}{{ dataStoreName }}.entityDescription(for: "{{ associatedValueManagedTypeName }}"){% endset %}
+            {% set inverseEnumRelationshipCommentName %}{{ associatedValueManagedTypeName}} Inverse{% endset %}
+            {% if not isPrimitive %}
+            {% call relationshipBuilder managedEntityName managedEntityName associatedValueManagedTypeName inverseEnumRelationshipName enumRelationshipVarName enumRelationshipName associatedValueTypeFetch "nullifyDeleteRule" associatedValue.isArray "" dataStoreName  %}
+
+            {% call relationshipBuilder managedEntityName associatedValueManagedTypeName inverseEnumRelationshipCommentName enumRelationshipVarName inverseEnumRelationshipName inverseEnumName entityName "nullifyDeleteRule" associatedValue.isArray "" dataStoreName  %}
+            {% endif %}
+            {% else %}
+            {% set isPrimitive %}{% call isPrimitiveType associatedValue.typeName %}{% endset %}
+            {% set associatedValueManagedTypeName %}Managed{% call generateTypeName associatedValue.typeName %}{% endset %}
+            {% set associatedValueTypeFetch %}{{ dataStoreName }}.entityDescription(for: "{{ associatedValueManagedTypeName }}"){% endset %}
+            {% if not isPrimitive %}
+            {% call relationshipBuilder managedEntityName managedEntityName associatedValueManagedTypeName inverseEnumRelationshipName enumRelationshipVarName enumRelationshipName associatedValueTypeFetch "nullifyDeleteRule" associatedValue.isArray "" dataStoreName  %}
+
+            {% call relationshipBuilder managedEntityName associatedValueManagedTypeName inverseEnumRelationshipCommentName enumRelationshipVarName inverseEnumRelationshipName inverseEnumName entityName "nullifyDeleteRule" associatedValue.isArray "" dataStoreName  %}
+            {% endif %}
+            {% endif %}
+        {% endfor %}
+      {% endfor %}
+    {% elif variable.typeName.array.elementType|enum and variable.typeName.array.elementType.hasAssociatedValues %}
+      {% for case in variable.typeName.array.elementType.cases %}
+        {% for associatedValue in case.associatedValues %}
+          {% set enumRelationshipName %}{{ variable.name }}{% call generateTypeName associatedValue.typeName %}{% endset %}
+          {% set enumRelationshipVarName %}{{ enumRelationshipName }}Relationship{% endset %}
+          {% set inverseEnumName %}inverse{{ variable.name|upperFirstLetter }}{% call generateTypeName associatedValue.typeName %}{% endset %}
+          {% set inverseEnumRelationshipName %}{{ inverseEnumName }}Relationship{% endset %}
+          {% set associatedValueManagedTypeName %}Managed{% call generateTypeName associatedValue.typeName %}{% endset %}
+          {% set associatedValueTypeFetch %}{{ dataStoreName }}.entityDescription(for: "{{ associatedValueManagedTypeName }}"){% endset %}
+          {% set inverseEnumRelationshipCommentName %}{{ associatedValueManagedTypeName}} Inverse{% endset %}
+            {% call relationshipBuilder entityTemplate.name managedEntityName associatedValueManagedTypeName inverseEnumRelationshipName enumRelationshipVarName enumRelationshipName associatedValueTypeFetch "nullifyDeleteRule" true "" dataStoreName  %}
+
+            {% call relationshipBuilder entityTemplate.name associatedValueManagedTypeName inverseEnumRelationshipCommentName enumRelationshipVarName inverseEnumRelationshipName inverseEnumName entityName "nullifyDeleteRule" true "" dataStoreName  %}
+
+        {% endfor %}
+      {% endfor %}
+{% endif %}
+{% endfor %}
+{% endfor %}
+    }
+}
+// sourcery:end
+
+func attributeType(for variableName: String, ofType type: Any.Type) -> NSAttributeType {
+    if type is String.Type
+        || type is String?.Type {
+        return .stringAttributeType
+    } else if type is Bool.Type
+        || type is Bool?.Type {
+        return .booleanAttributeType
+    } else if type is Int.Type
+        || type is Int?.Type {
+        return .integer64AttributeType
+    } else if type is Int64.Type
+        || type is Int64?.Type {
+        return .integer64AttributeType
+    } else if type is Double.Type
+        || type is Double?.Type {
+        return .doubleAttributeType
+    } else if type is Data.Type
+        || type is Data?.Type {
+        return .binaryDataAttributeType
+    } else if type is Codable.Type
+        || type is Dictionary<String, String>.Type
+        || type is Array<String>.Type
+        || type is [String]?.Type {
+        return .transformableAttributeType
+    } else {
+        fatalError("Cannot resolve CoreData attribute type for \"\(variableName)\" of type \"\(String(describing: type))\"")
+    }
+}
+
+private extension NSNumber {
+    static let empty = NSNumber(0)
+}
+private extension Decimal {
+    static let empty = NSNumber(0)
+}
+private extension Int {
+    static let empty = NSNumber(0)
+
+    mutating func increment(by: Int = 1) {
+        self += by
+    }
+
+    mutating func decrement(by: Int = 1) {
+        self -= by
+    }
+}
+private extension TimeInterval {
+    static let empty = NSNumber(0)
+}
+private extension Bool {
+    static let empty = NSNumber(0)
+}
+private extension String {
+    static let empty = ""
+}
+
+extension KeyPath where Value: Collection {
+    func map<SubValue>(_ keyPath: KeyPath<Value.Element, SubValue>) -> KeyPath<Value.Element, SubValue> {
+        return keyPath
+    }
+}
+
+public extension Array where Element: Persistable & UniqueIDConstraintKeyPath {
+    func createAndPopulate(groupID: String? = nil, updateIfEntityExists: Bool = true, insertionPolicy: BatchInsertionPolicy = .insertOrUpdate, completeClosure: ((Result<[Element], PersistableError>) -> Void)?) {
+        Element.createBatchAndPopulate(groupID: groupID, from: self, insertionPolicy: insertionPolicy, completeClosure: completeClosure)
+    }
+}
+
+extension CoreDataEntity {
+    @discardableResult
+    static func create(attribute: String, type: NSAttributeType, isOptional: Bool, defaultValue: Any? = nil) -> NSAttributeDescription {
+        let description = NSAttributeDescription()
+        description.name = attribute
+        description.attributeType = type
+        if description.attributeType == .transformableAttributeType { description.valueTransformerName = "NSSecureUnarchiveFromData" }
+        description.isOptional = isOptional
+        if let value = defaultValue { description.defaultValue = value }
+        return description
+    }
+}
+
+extension NSRelationshipDescription {
+    func populate(with relationship: String, destination: NSEntityDescription, isArray: Bool, deleteRule: NSDeleteRule, inverseRelationship: NSRelationshipDescription) {
+        self.name = relationship
+        self.destinationEntity = destination
+        if isArray {
+            self.minCount = 0
+            self.maxCount = 0
+            self.isOrdered = true
+        } else {
+            self.maxCount = 1
+        }
+        self.deleteRule = deleteRule
+        self.inverseRelationship = inverseRelationship
+    }
+}

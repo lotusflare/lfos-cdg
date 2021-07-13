@@ -1,0 +1,12 @@
+sources:
+  - ${SRCROOT}/CDG-Example
+  - ${SRCROOT}/../CoreDataGenerator
+templates: 
+  - ${SRCROOT}/../CoreDataGenerator/CoreDataGenerator/Templates
+args:
+  paramCaseFormattingMode: snake # none, snake, camel (possible options)
+output: 
+  path: ${SRCROOT}/CDG-Example/Generated/
+  link: 
+    project: ${SRCROOT}/CDG-Example.xcodeproj
+    target: CDG-Example
