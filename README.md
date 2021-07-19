@@ -1,16 +1,9 @@
-
-<!-- PROJECT LOGO -->
-<p align="center">
-  <a href="https://github.com/lotusflare/lfos-cdg">
-    <img src="https://lotusflare.com/_nuxt/img/c3aa122.svg" alt="Logo" width="600" height="200">
-  </a>
-</p>
+# Core Data Generator
 
 [![MIT License][license-shield]][license-url]
 [![LinkedIn][linkedin-shield]][linkedin-url]
 [![Contributors][contributors-shield]][contributors-url]
 [![Issues][issues-shield]][issues-url]
-# Core Data Generator
 
 - [Introduction](#introduction)
   - [Features](#features)
