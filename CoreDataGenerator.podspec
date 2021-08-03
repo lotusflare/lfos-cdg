@@ -2,7 +2,7 @@ Pod::Spec.new do |s|
 
   s.name            = "CoreDataGenerator"
   s.version         = '1.0.0'
-  s.license         = { :type => 'MIT', :file => 'LICENSE' }
+  s.license         = 'MIT'
   s.homepage        = 'https://github.com/lotusflare/lfos-cdg'
   s.authors         = { 'LotusFlare' => 'ios@lotusflare.com' }
   s.summary         = "LotusFlare Core Data Generator"
